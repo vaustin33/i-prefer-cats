@@ -1,0 +1,316 @@
+---
+title: "Word Vectors & Cat Collectors"
+subtitle: "An introduction to word representation using Kaggle's PetFinder dataset."
+output:
+  rmdformats::readthedown:
+    highlight: kate
+    self_contained: no
+---
+
+
+```{r knitr_init, echo=FALSE, cache=FALSE}
+library(knitr)
+library(rmdformats)
+
+## Global options
+options(max.print="75")
+
+opts_knit$set(width=90)
+```
+
+
+```{r include=FALSE}
+setwd("C:/Users/vaustin/Desktop/Pet Finder Comp/all/RawData")
+```
+#Reading in the Data & Preprocessing
+Loading necessary packages.
+```{r Packages, echo=TRUE, results='hide', warning=FALSE, message=FALSE}
+library(NLP)
+library(psych)
+library(readr)
+library(text2vec)
+library(SnowballC)
+library(tokenizers)
+library(stopwords)
+library(stringi)
+library(stringr)
+library(RTextTools)
+library(textcat)
+library(Rtsne)
+library(ggplot2)
+library(plotly)
+```
+Reading in the description, PetID, and AdoptionSpeed columns from the provided training set.
+```{r echo=TRUE, cache.lazy=TRUE}
+train <- read_csv("train/train.csv", col_types = cols_only(AdoptionSpeed = col_guess(), Description = col_guess(), PetID = col_guess()))
+head(train)
+```
+The amount of text processing and cleaning required of us is task specific and depends on the type of word representation we're planning on generating. Typically the simpler the representation, the less robust it is to small differences in the text, so for our first representation (bag-of-words matrix) we'll try to get the description text as standardized as possible. 
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+print("yo")
+```
+All of these steps are done in handy wrapper functions below, but we can split out the steps on an example description to see the changes step-by-step.
+```{r Lowercasing, echo=TRUE, cache.lazy=TRUE, results = 'asis'}
+description <- train$Description[1]
+description <- stri_trans_tolower(description)
+description
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+print("yo")
+```
+The function below removes punctuation and tokenizes words based on really fleshed out unicode standards that take into account things like carriage returns, quotation marks, and apostrophes- they are even robust to emojis.     
+```{r Tokenizing, echo=TRUE, cache.lazy=TRUE}
+description <- stri_split_boundaries(description, type = "word", skip_word_none = TRUE)
+description
+```
+Several different types of stemmers exists, but we'll use one of the most popular, the Porter stemmer, which implements over 100 rewrite rules and characteristically removes "e" endings and changes words like "study" and "studying" to "studi". 
+```{r Stemming, echo=TRUE, cache.lazy=TRUE}
+description <- lapply(description, wordStem)
+description
+```
+Fortunately, tokenize_word_stems in the tokenizers package can do all of the above steps in one fell swoop. We'll subset our data frame to only include english descriptions, then we can use the tokenize_word_stems function as our tokenizer argument in the itoken function, also from the tokenizer package, to create an iterator over a list of our description character vectors.
+```{r Tokenizing all descriptions, echo=TRUE, cache.lazy=TRUE}
+train$Language <- textcat(train$Description)
+train <- train[train$Language == "english",] 
+train <- train[,1:3]
+token.iterator = itoken(train$Description, tokenizer = tokenize_word_stems)
+```
+We can use this tokenizing iterator to apply the above steps to every description in our dataset and create a vocabulary of all distinct tokens. The create_vocabulary stopwords argument allows us to simultaneously remove really common, uninteresting words (think Kevin from The Office- why waste time say lot word when few word do trick?). We're using the stemmed Snowball stopwords list to remove these words as we create our vocabulary. Below also shows our example description with these words removed.
+```{r Creating vocabulary, echo=TRUE, cache.lazy=TRUE}
+stemmed.stopwords <- unlist(lapply(data_stopwords_snowball$en, wordStem))
+vocab <- create_vocabulary(token.iterator, stopwords = stemmed.stopwords ) 
+description <- unlist(description)
+description <- description[! description %in% stemmed.stopwords]
+description
+```
+Our vocabulary is a data frame with our unique tokens (words), a count of how many times the term appears across all "documents" (descriptions), and how many documents contain this term.  
+```{r Vocab preview, echo=TRUE, cache.lazy=TRUE}
+headTail(vocab)
+```
+
+Terms that only occur in one description (which makes up a huge part of our vocabulary!) are unlikely to provide any insight, and they'll make our already sparse bag-of-words matrix larger and even more sparse. 
+```{r Vocab histogram, echo=TRUE, cache.lazy=TRUE}
+hist(vocab$doc_count, xlab = "# of descriptions word appears in", xlim = c(1,100), breaks = seq(1, 6845, 1))
+```
+
+We can prune these out by setting a minimum for the number of descriptions the word can appear in.
+```{r Pruning vocab, cache.lazy=TRUE}
+pruned_vocab = prune_vocabulary(vocab, doc_count_min = 5)
+```
+
+So now we have a clean, stemmed, tokenized vocabulary. It's still just text though- how can we numerically represent this for an algorithm? 
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+print("yo")
+```
+One of the simplest approachs by creating a bag-of-words matrix- every row is a description, and every unique word in our vocabulary gets a column, each row gets a 1 in every column where the description contains that word. 
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+print("yo")
+```
+# Bag-of-Words Matrix
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+print("yo")
+```
+
+```{r Creating bag-of-word matrix, echo=TRUE, cache.lazy=TRUE}
+doc.term.matrix <- create_dtm(token.iterator, vocab_vectorizer(pruned_vocab))
+bow.matrix <- as.matrix(doc.term.matrix)
+bow.matrix <- cbind(train$Description, bow.matrix)
+as.data.frame(bow.matrix)[1,-(2:4091)]
+```
+
+One of the major limitations of the b-o-w approach to representing text numerically is that the order of words in a document is not captured, so a huge amount of the their meaning is lost. These two descriptions below both have a 1 in the "bark" column, for example, but the context around the word "bark" makes a large difference in the sentiment.
+```{r Bark example, echo=TRUE, cache.lazy=TRUE}
+as.data.frame(bow.matrix)[c(22,32), which( colnames(bow.matrix)=="bark")]
+```
+
+```{r Bark descriptions, echo=TRUE, cache.lazy=TRUE}
+bow.matrix[c(22,32), 1]
+```
+Another example:
+```{r Another example, echo=TRUE, cache.lazy=TRUE}
+substr(train$Description[41], 311, 408 )
+```
+#Word2Vec
+Two popular methods to get around this loss of context are called Word2Vec and GloVe (global vectors for word representation). Both are ways of vectorizing words according to their co-occurance information, and today I'll just be walking through word2vec. 
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+print("yo")
+```
+Word2vec vectorizes words by training a simple neural network to create a vector such that surrounding words can be predicted given an input word. Typically, a variation of a softmax output layer is then used to map these weights to probablities of nearby words given the input word. The weight matrix produced in this learning task is a matrix of our word vectors. 
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+print("yo")
+```
+Word2vec vectors are not only able to represent similarily between words, but also analogous relationships, like vector(kitten) - vector(cat) + vector(dog) = vector(puppy).
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+print("yo")
+```
+Below we'll build a word2vec model for our descriptions using H2o.ai, which uses the model explained above (called a skip-gram model) to produce the word vectors and a hierarchical softmax output layer (less calculations, faster than typical softmax). 
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+print("yo")
+```
+Installing and initializing H2o.ai functionality.
+```{r Installing and initializing h2o.ai functionality, message=FALSE, warning=FALSE, eval=T, echo=T}
+#if ("package:h2o" %in% search()) { detach("package:h2o", unload=TRUE) }
+#if ("h2o" %in% rownames(installed.packages())) { remove.packages("h2o") }
+#pkgs <- c("RCurl","jsonlite")
+#for (pkg in pkgs) {
+#if (! (pkg %in% rownames(installed.packages()))) { install.packages(pkg) }
+#}
+#install.packages("h2o", type="source", #repos="http://h2o-release.s3.amazonaws.com/h2o/rel-yates/1/R")
+
+library(h2o)
+
+h2o.init()
+```
+Creating a tokenizing function compatible with our H2o frame.
+```{r Creating specialized tokenizing function compatible with H2o Frame, echo=T, cache.lazy=TRUE}
+tokenize <- function(sentences, stop.words = data_stopwords_snowball$en) {
+    tokenized <- h2o.tokenize(as.character(sentences), "\\\\W+")
+    tokenized.lower <- h2o.tolower(tokenized)
+    tokenized.lengths <- h2o.nchar(tokenized.lower)
+    tokenized.filtered <- tokenized.lower[is.na(tokenized.lengths) || tokenized.lengths >= 2,]
+    tokenized.words <- tokenized.filtered[h2o.grep("[0-9]", tokenized.filtered, invert = TRUE, output.logical = TRUE),]
+    tokenized.words[is.na(tokenized.words) || (! tokenized.words %in%     data_stopwords_snowball$en),]
+}
+```
+Reading the data into our H2o cluster.
+```{r Reading data into H2o cluster, echo=T, message=FALSE, warning=FALSE, cache.lazy=TRUE}
+train.filepath <- normalizePath("train/train.csv")
+train.h2o <- h2o.importFile(train.filepath, destination_frame = "train.h2o.df",
+                             col.names = c("Description", "PetID", "AdoptionSpeed"), 
+                             col.types = c("String", "Enum", "Enum"), header = TRUE,
+                            skipped_columns = append(1:20, 23) )
+```
+
+Applying the tokenization function and creating the model.
+```{r Applying tokenization function and creating word2vec model, echo=T, message=FALSE, warning=FALSE, cache.lazy=TRUE}
+vocab.h2o <- tokenize(train.h2o$Description)
+word2vec <- h2o.word2vec(vocab.h2o,  sent_sample_rate = 0, epochs = 10)
+```
+Quick peek at how our model did by pulling words with vectors projected into a similar space- synonyms!
+```{r Energetic synonyms, echo=TRUE, cache.lazy=TRUE}
+h2o.findSynonyms(word2vec, "energetic", count = 5)
+```
+
+```{r Adorable synonyms, echo=TRUE, cache.lazy=TRUE}
+h2o.findSynonyms(word2vec, "adorable", count = 5)
+```
+#Visualizing Word2Vec
+We can create a visualization of the word2vec embeddings using an algorithm called t-SNE which maps high-dimensional objects to low-dimensional (normally 2) objects while preserving relative locations of the inputs.
+```{r Word2vec t-SNE visualization, echo=TRUE, warning=FALSE, cache.lazy=TRUE}
+vecs <- h2o.transform(word2vec, vocab.h2o)
+vec.df <- as.data.frame(vecs)
+vocabcol <- as.data.frame(vocab.h2o)
+colnames(vocabcol) <- "Word"
+vecvocab.df <- cbind(vocabcol, vec.df)
+vecvocab.df <- vecvocab.df[duplicated(vecvocab.df) == "FALSE",]
+vecvocab.df <- vecvocab.df[!is.na(vecvocab.df$Word),]
+rownames(vecvocab.df) <- vecvocab.df$Word
+vec.rownamed.df <- vecvocab.df[,-1]
+vec.rownamed.df <- vec.rownamed.df[!is.na(vec.rownamed.df),]
+tsne <- Rtsne(vec.rownamed.df[1:250,], perplexity = 15, pca = FALSE, check_duplicates = FALSE)
+tsne.plot <- tsne$Y %>%
+  as.data.frame() %>%
+  mutate(word = row.names(vec.rownamed.df)[1:250]) %>%
+  ggplot(aes(x = V1, y = V2, label = word)) + 
+  geom_text(size = 3)
+```
+
+```{r Print visualization, echo=FALSE, cache.lazy=TRUE}
+tsne.plot
+cat('\n')
+```
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+print("yo")
+```
+
+#Next Steps
+
+```{r eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+print("yo")
+```
+
+We're definitely getting there with word2vec compared to just producing a bag-of-words matrix, but there are still plenty of limitations. Word2vec produces just one embedding per word, so it isn't robust to words with mulitple meanings, or new words not previously in the vocabulary. State of the art approaches to word embedding typically 
+
+1) use transfer learning, where a model pre-trained on a huge vocabulary is used as a starting point and can be fine-tuned to learn the more specialized vocabulary of the domain you're working in 
+
+2) are character based, so that the model can form new vectors for unseen words
+
+3) are bi-directional, so information on if a surrounding word is before or after the input word (or character) is not lost.
+
+Popular approaches include ELMo (Embeddings from Language Models), BERT (Bidirectional Encoder Representations from Transformers), and OpenAI's GPT-2.
+       
+The vectors produced by these word embedding techniques can be used in clustering analysis, topic modeling, sentiment analysis, and many other applications which open doors to countless new features we can add to predicitive models (like my simple GBM for this Kaggle comp). 
+
+```{r eval=F, echo=T}
+library(MASS)
+library(readr)
+library(tools)
+library(gbm)
+library(Metrics)
+
+setwd("C:/Users/vaustin/Desktop/Pet Finder Comp/all/RawData")
+
+
+train.k <- read_csv("train/train.csv", col_types = cols(RescuerID = col_skip()))
+        
+traincols <- colnames(train.k)[-c(2, 3, 16, 17, 19, 20, 21)]
+train.k[traincols] <- lapply(train.k[traincols], factor)
+
+train_ind = sample(seq_len(nrow(train.k)), size = .80*nrow(train.k)) 
+train.set = train.k[train_ind,] 
+test.set = train.k[-train_ind,]
+
+boost = gbm(AdoptionSpeed ~., data = train.set[,-c(2,20, 21)], distribution = "multinomial", n.trees = 10000, shrinkage = 0.01, interaction.depth = 4)
+AdoptionSpeed <- predict(boost, newdata = test.set[,-c(23)], n.trees = 10000)
+max.AdoptionSpeed <- apply(AdoptionSpeed, 1, which.max)
+AdoptionSpeed <- max.AdoptionSpeed - 1
+PetID <- test.set$PetID
+TrueAdoptionSpeed <- test.set$AdoptionSpeed
+ScoreQuadraticWeightedKappa(AdoptionSpeed, TrueAdoptionSpeed) # 0.341
+
+#############################################################################
+
+library(topicmodels)
+library(tm)
+# Creating a bag-of-words matrix to feed into LDA model, with only English descriptions.
+train.k$Language <- textcat(train.k$Description)
+train.k.en <- train.k[train.k$Language == "english",] 
+train.k.en <- train.k.en[,-24]
+train.k.en$Description <- iconv(enc2utf8(train.k.en$Description),sub="byte")
+vocab.k.en <- SimpleCorpus(VectorSource(train.k.en$Description))
+decr.doc.term <- DocumentTermMatrix(vocab.k.en)
+zero.row <- row.names(decr.doc.term[apply(decr.doc.term[,-1], 1, function(x) all(x==0)),])
+decr.doc.term <- decr.doc.term[apply(decr.doc.term[,-1], 1, function(x) !all(x==0)),]
+# Latent Dirichlet allocation (LDA) is a probabilistic model that sees a decription as a collection of topics, with each word in the description as a contribution to a specific topic. We're generating 5 topics with our LDA model and using the model to classify each description into 1 of the 5 topics.
+lda.k.en <- LDA(decr.doc.term, k = 5)
+topic <- get_topics(lda.k.en)
+train.k.en <- train.k.en[-1359,]
+#Joining our dataset with the assigned topics to use topic as a feature in the GBM.
+train.k.en.topics <- cbind(train.k.en, topic)
+train.k.en.topics <- train.k.en.topics[,c(21,24)]
+train.k.topics <- merge(train.k, train.k.en.topics, by = "PetID", all.x = TRUE)
+train.k.topics <- train.k.topics[,-24]
+train.k.topics$topic <- ifelse(is.na(train.k.topics$topic), "6", train.k.topics$topic )
+train.k.topics$topic <- factor(train.k.topics$topic)
+
+train.top.ind = sample(seq_len(nrow(train.k.topics)), size = .80*nrow(train.k.topics)) 
+train.top.set = train.k.topics[train.top.ind,] 
+test.top.set = train.k.topics[-train.top.ind,]
+
+boost.top = gbm(AdoptionSpeed ~., data = train.top.set[,-c(1,3, 21)], distribution = "multinomial", n.trees = 10000, shrinkage = 0.01, interaction.depth = 4)
+AdoptionSpeed.top <- predict(boost.top, newdata = test.top.set[,-c(23)], n.trees = 10000)
+max.AdoptionSpeed.top <- apply(AdoptionSpeed.top, 1, which.max)
+AdoptionSpeed.top <- max.AdoptionSpeed.top - 1
+PetID.top <- test.top.set$PetID
+TrueAdoptionSpeed.top <- test.top.set$AdoptionSpeed
+ScoreQuadraticWeightedKappa(AdoptionSpeed.top, TrueAdoptionSpeed.top) #0.344 
+# 20 rank jump!
+```
+#Sources & Additional Reading
+https://towardsdatascience.com/machine-learning-text-processing-1d5a2d638958
+https://github.com/h2oai/h2o-3/blob/master/h2o-r/demos/rdemo.word2vec.craigslistjobtitles.R#L50
+https://blogs.rstudio.com/tensorflow/posts/2017-12-22-word-embeddings-with-keras/
+http://mccormickml.com/2016/04/19/word2vec-tutorial-the-skip-gram-model/
+https://meanderingstream.github.io/nlp_for_text_classification/#/
